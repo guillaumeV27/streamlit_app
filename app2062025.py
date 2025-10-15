@@ -2,20 +2,25 @@ import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
+import matplotlib.pyplot as plt
+import shap
+import pickle
+
 
 # Mapping des endpoints API
 URL_MAPPER = {
     "local": "http://localhost:5000/predict/",
-    "hosted": "https://flask-api-predict.onrender.com/predict/"
+    "hosted": "https://credit-prediction-demo.onrender.com/predict/"
 }
+api_version = "local"  # Toggle ici si tu veux changer d'environnement
 
-api_version = "hosted"
-
-# Chargement de la base client (50 exemples)
+# Chargement de la base client (100 exemples)
 client_database = pd.read_csv("prod_client_database_example_100.csv")
 client_database = client_database.drop(columns=["TARGET"])
 client_ids = client_database["SK_ID_CURR"].to_list()
+
+
+
 
 def request_prediction(data, endpoint_url):
 
@@ -51,6 +56,99 @@ def main():
         st.subheader("Recherche de client dans base de données interne")
         id_client_choix = st.selectbox("Choisir un client par ID bancaire", tuple(client_ids))
         st.write("ID du client sélectionné :", id_client_choix)
+
+    # Charger les valeurs SHAP depuis le fichier pickle
+    with open("shap_values.pkl", "rb") as f:
+        shap_values = pickle.load(f)
+
+    # Liste des features à afficher et leur ordre fixe
+    features_to_show = ['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3','PAYMENT_RATE', 'NAME_FAMILY_STATUS_Married', 'CODE_GENDER', 'AMT_ANNUITY', 'APPROVED_CNT_PAYMENT_MEAN']
+    fixed_order = features_to_show  # tu peux les séparer si besoin
+
+    # Sélection du client (id)
+    # line_id = int(id_client_choix)
+    
+
+    # Exemple : ton DataFrame client_database contient la colonne "SK_ID_CURR"
+    client_row2 = client_database[client_database["SK_ID_CURR"] == id_client_choix]
+
+    if client_row2.empty:
+        st.error("Client introuvable dans la base.")
+    else:
+        # Trouver l'index (position) de ce client dans X_test_enc (ou client_database si même ordre)
+        try:
+            line_id = client_database.index.get_loc(client_row2.index[0])
+        except KeyError:
+            st.error("⚠️ Impossible de trouver la position du client dans les données d'entraînement.")
+            st.stop()
+
+        with st.container():
+            st.subheader("Données pour les 8 plus importantes features du client")
+
+            # Vérifier les colonnes disponibles
+            available_features = [f for f in features_to_show if f in client_row2.columns]
+            missing_features = [f for f in features_to_show if f not in client_row2.columns]
+
+            # Extraire les données existantes
+            if not available_features:
+                # Si aucune des colonnes n'existe
+                st.warning("Aucune donnée disponible pour les colonnes demandées.")
+                client_features = pd.DataFrame(
+                    {"Valeur": ["Donnée non renseignée"] * len(features_to_show)},
+                    index=features_to_show
+                )
+            else:
+                # Créer un DataFrame avec les colonnes présentes
+                client_features = client_row2.reindex(columns=features_to_show)
+                # Remplacer les NaN ou colonnes manquantes par "Donnée non renseignée"
+                client_features = client_features.fillna("Donnée non renseignée")
+                client_features = client_features.T.rename(columns={client_row2.index[0]: "Valeur"})
+
+            # Si certaines colonnes sont absentes du DataFrame
+            if missing_features:
+                for f in missing_features:
+                    client_features.loc[f] = "Donnée non renseignée"
+
+            # Affichage dans Streamlit
+            st.write("### Valeurs du client sélectionné")
+            st.dataframe(client_features)
+
+        with st.container():
+            st.subheader("Données SHAP du client")
+
+            # Vérifier la validité de l'index
+            if line_id < 0 or line_id >= shap_values.values.shape[0]:
+                st.error(f"❌ L'identifiant {line_id} est invalide (max = {shap_values.values.shape[0]-1}).")
+            else:
+                st.write(f"Client sélectionné : {id_client_choix} (ligne {line_id})")
+
+                # Extraire les valeurs SHAP du client
+                shap_client = shap_values[line_id]
+
+                # Créer un mapping feature -> index
+                feature_to_index = {name: i for i, name in enumerate(shap_client.feature_names)}
+
+                # Sélectionner uniquement les features présentes ET dans le bon ordre
+                ordered_features = [f for f in fixed_order if f in feature_to_index]
+
+                # Construire un nouvel objet SHAP dans l’ordre souhaité
+                indices = [feature_to_index[f] for f in ordered_features]
+
+                shap_filtered = shap.Explanation(
+                    values=shap_client.values[indices],
+                    base_values=shap_client.base_values,
+                    data=shap_client.data[indices],
+                    feature_names=ordered_features
+                )
+
+                # Créer et afficher la figure
+                fig, ax = plt.subplots(figsize=(10, 5))
+                shap.plots.waterfall(shap_filtered, show=False)
+                plt.tight_layout()
+
+                # Afficher dans Streamlit
+                st.pyplot(fig)
+
 
     with st.container(border=True):
         st.subheader("Requête vers endpoint de prédiction API")  
